@@ -6,29 +6,13 @@
 #include <LittleFS.h>
 #include <FS.h>
 
-#include <Adafruit_GFX.h>
-#include <Adafruit_NeoMatrix.h>
-#include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 
-#include "Motion.h"   // Radar/Ripple 用
+#include "Motion.h"        // Radar/Ripple 用
+#include "Display_image.h" // LED表示モジュール
 
 /***** ========== LED MATRIX ========== *****/
-#define LED_PIN   14
-#define W 8
-#define H 8
-#define NUM_LEDS (W*H)
-#define PIXEL_TYPE (NEO_GRB + NEO_KHZ800)
 #define GLOBAL_BRIGHTNESS 10
-
-Adafruit_NeoMatrix matrix(
-  W, H, LED_PIN,
-  NEO_MATRIX_TOP + NEO_MATRIX_LEFT + NEO_MATRIX_ROWS + NEO_MATRIX_PROGRESSIVE,
-  PIXEL_TYPE
-);
-
-// Motion.cpp から参照できるように公開
-Adafruit_NeoMatrix& Matrix = matrix;
 
 /***** ========== 無線・ファイル設定 ========== *****/
 static const int WIFI_CH = 6;
@@ -97,9 +81,6 @@ struct RxState {
   unsigned long lastNackTxAt = 0;
   uint16_t      lastNackTxIdx = 0xFFFF;
 } rx;
-
-// 表示タイマ
-unsigned long ledDisplayUntil = 0;
 
 // HELLOバースト制御
 unsigned long helloBurstUntil = 0;
@@ -175,42 +156,6 @@ String loadJsonFromLittleFS(const char* path, size_t maxBytes){
   return s;
 }
 
-/***** ========== LED描画 ========== *****/
-static void drawRGBArrayRotCCW(const uint8_t* rgb, size_t n) {
-  if (n < NUM_LEDS * 3) return;
-  matrix.fillScreen(0);
-  for (int sy=0; sy<H; ++sy){
-    for (int sx=0; sx<W; ++sx){
-      size_t i = (sy*W+sx)*3;
-      int dx = sy, dy = W-1-sx; // 90°CCW
-      matrix.drawPixel(dx, dy, matrix.Color(rgb[i], rgb[i+1], rgb[i+2]));
-    }
-  }
-  matrix.show();
-}
-
-static bool renderFromJson(const uint8_t* buf, size_t len) {
-  DynamicJsonDocument doc(8192);
-  if (deserializeJson(doc, buf, len)) { Serial.println("❌ JSON parse"); return false; }
-
-  JsonArray rgbA;
-  if (doc["rgb"].is<JsonArray>()) rgbA = doc["rgb"].as<JsonArray>();
-  else if (doc["records"].is<JsonArray>() && doc["records"][0]["rgb"].is<JsonArray>())
-    rgbA = doc["records"][0]["rgb"].as<JsonArray>();
-  else { Serial.println("❌ no rgb[]"); return false; }
-
-  const size_t need = NUM_LEDS*3;
-  if (rgbA.size() < need) { Serial.printf("❌ rgb too short %u<%u\n", (unsigned)rgbA.size(), (unsigned)need); return false; }
-
-  static uint8_t rgbBuf[NUM_LEDS*3];
-  for (size_t i=0; i<need; ++i) rgbBuf[i] = (uint8_t)rgbA[i].as<int>();
-
-  drawRGBArrayRotCCW(rgbBuf, need);
-  Serial.println("✅ 表示完了");
-  ledDisplayUntil = millis() + DISPLAY_MS;  // 3秒表示
-  return true;
-}
-
 /***** ========== 送信関連 ========== *****/
 void sendHELLO(){
   if (!broadcastPeerAdded) { ensurePeer(MAC_BC,false); broadcastPeerAdded = true; }
@@ -262,7 +207,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len){
   if (len <= 0) return;
 
   // 画像表示中は受信を無視（LED表示3秒の間）
-  if (ledDisplayUntil && millis() < ledDisplayUntil) {
+  if (Display_IsActive()) {
     // Serial.println("⏸ 表示中のため受信無視");
     return;
   }
@@ -294,7 +239,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len){
     }
     if (!peerKnown) { memcpy(peerMac, mac, 6); peerKnown = true; }
     bool idle = peerKnown && !rx.active && tx_done;
-    if (idle) { Serial.println("🔄 再交換開始"); matrix.fillScreen(0); matrix.show(); startNewExchange(); }
+    if (idle) { Serial.println("🔄 再交換開始"); Display_Clear(); startNewExchange(); }
     else beginExchangeIfReady();
     return;
   }
@@ -315,7 +260,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len){
     if (!peerKnown) { memcpy(peerMac, mac, 6); peerKnown = true; }
 
     Serial.printf("📥 受信開始... (RSSI:%d)\n", rssi);
-    matrix.fillScreen(0); matrix.show();
+    Display_Clear();
 
     memset(&rx, 0, sizeof(rx));
     rx.active = true; rx.msg_id = m->msg_id; rx.total = m->total; rx.len_all = m->len_all; rx.crc32_all = m->crc32_all;
@@ -357,7 +302,7 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len){
       if (csum == rx.crc32_all){
         sendACK(mac, rx.msg_id); Serial.println("✅ 受信完了");
         Ripple_PlayOnce();                 // 完了エフェクト
-        renderFromJson(rx.buf, rx.len_all);// LED表示
+        Display_ShowFromJson(rx.buf, rx.len_all, DISPLAY_MS);// LED表示
         rx.active = false; lastPct = 0;
       } else {
         Serial.println("❌ CRC - NACK(0)");
@@ -396,15 +341,14 @@ void setup(){
   Serial.println("\n=== ESP-NOW データ交換 & LED表示 ===\n");
 
   // LED
-  matrix.begin(); matrix.setBrightness(GLOBAL_BRIGHTNESS);
-  matrix.fillScreen(0); matrix.show();
+  Display_Init(GLOBAL_BRIGHTNESS);
   Serial.println("✅ LED初期化");
 
   // 起動演出 → 自分のJSON表示
   Serial.println("💫 起動Ripple"); Ripple_PlayOnce();
   myJson = loadJsonFromLittleFS(JSON_PATH, MAX_MSG_BYTES);
   Serial.printf("📄 JSON %u bytes\n", (unsigned)myJson.length());
-  Serial.println("💡 起動表示"); renderFromJson((const uint8_t*)myJson.c_str(), myJson.length());
+  Serial.println("💡 起動表示"); Display_ShowFromJson((const uint8_t*)myJson.c_str(), myJson.length(), DISPLAY_MS);
 
   // WiFi/ESP-NOW
   WiFi.mode(WIFI_STA);
@@ -441,10 +385,8 @@ void loop(){
   unsigned long now = millis();
 
   // 表示の自動消灯→レーダー再開＋HELLOバースト開始
-  if (ledDisplayUntil && now >= ledDisplayUntil){
-    matrix.fillScreen(0); matrix.show();
+  if (Display_EndIfExpired()){
     Serial.println("💤 LED消灯");
-    ledDisplayUntil = 0;
 
     // 次の接続は再び"開始判定"から入る
     linkEstablished = false;
@@ -458,7 +400,7 @@ void loop(){
   }
 
   // レーダー（受信中/表示中以外）
-  if (!rx.active && ledDisplayUntil == 0){ Radar_IdleStep(true); delay(16); }
+  if (!rx.active && !Display_IsActive()){ Radar_IdleStep(true); delay(16); }
 
   // 表示直後のHELLOバースト（peerKnownかどうかに関係なく打つ）
   if (helloBurstUntil){
