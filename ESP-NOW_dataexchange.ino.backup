@@ -1,0 +1,815 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+
+#include <LittleFS.h>
+#include <FS.h>
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_NeoMatrix.h>
+#include <Adafruit_NeoPixel.h>
+#include <ArduinoJson.h>
+#include "Motion.h"
+#include "esp_wifi_types.h"        // ← 追加（MACヘッダの型）
+
+// ==== LEDマトリクス設定 ====
+#define LED_PIN   14
+#define W 8
+#define H 8
+#define NUM_LEDS (W*H)
+#define PIXEL_TYPE (NEO_GRB + NEO_KHZ800)
+#define GLOBAL_BRIGHTNESS 10
+
+Adafruit_NeoMatrix matrix(
+  W, H, LED_PIN,
+  NEO_MATRIX_TOP + NEO_MATRIX_LEFT + NEO_MATRIX_ROWS + NEO_MATRIX_PROGRESSIVE,
+  PIXEL_TYPE
+);
+
+// Motion.cppで使用するための参照
+Adafruit_NeoMatrix& Matrix = matrix;
+
+// ===== 無線設定 =====
+static const int WIFI_CH = 6;               // 両端で合わせる
+static const uint8_t MAC_BC[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+
+// ===== LittleFS =====
+static const char* JSON_PATH = "/my_data_text.json";
+
+// ===== メッセージ上限・チャンク =====
+// [STAB] チャンクを少し小さく（200→160B）して損失率を下げる
+static const size_t MAX_MSG_BYTES   = 2048;     // 2KBまで（必要に応じて増やせる）
+static const size_t CHUNK_DATA_MAX  = 160;      // 1フレームの実データ（安定化）
+static const size_t MAX_CHUNKS      = (MAX_MSG_BYTES + CHUNK_DATA_MAX - 1) / CHUNK_DATA_MAX;
+
+// ===== プロトコル（シンプル版） =====
+enum MsgType : uint8_t { HELLO=1, META=2, CHUNK=3, NACK=4, ACK=5, TURN=6 };
+
+struct __attribute__((packed)) FrameMeta {
+  uint8_t  type;          // META
+  uint16_t msg_id;        // メッセージ識別
+  uint16_t total;         // チャンク総数
+  uint16_t len_all;       // 全体長
+  uint32_t crc32_all;     // 全体CRC
+};
+
+struct __attribute__((packed)) FrameChunk {
+  uint8_t  type;          // CHUNK
+  uint16_t msg_id;
+  uint16_t idx;           // 0..total-1
+  uint16_t payload_len;   // data長
+  uint8_t  data[CHUNK_DATA_MAX];
+};
+
+struct __attribute__((packed)) FrameHello { uint8_t  type; };
+struct __attribute__((packed)) FrameAck   { uint8_t  type; uint16_t msg_id; };
+struct __attribute__((packed)) FrameNack  { uint8_t  type; uint16_t msg_id; uint16_t missing_idx; };
+struct __attribute__((packed)) FrameTurn  { uint8_t  type; uint16_t msg_id; };
+
+// ===== 状態（シンプル・トークン制） =====
+static bool hasPeer = false;      // 相手確定
+static bool isInitiator = false;  // 自分は送信側か？（MAC比較で決定）
+static bool txRight = false;      // 送信権（トークン所持）
+static bool txLaunched = false;   // 送信セッション開始済みフラグ
+uint8_t peerMac[6] = {0};
+unsigned long lastHelloMs = 0;
+bool broadcastPeerAdded = false;
+
+// 自ノード送信データ（LittleFSからロード）
+String   myJson;
+
+// 送信側状態
+uint16_t current_msg_id = 1;
+String   tx_json;
+uint32_t tx_crc = 0;
+uint16_t tx_total = 0;
+uint16_t tx_len_all = 0;
+bool     tx_done = false;
+bool     tx_meta_sent = false;  // METAを本当に送ったか
+unsigned long lastSendMs = 0;
+unsigned long lastProgressMs = 0;    // 進捗監視
+uint16_t nextIdx = 0;                // 次に投げるチャンク
+
+// ACK再送用（Responder側でTURN待ち時に使用）
+static unsigned long lastAckSentAt = 0;
+static uint16_t lastAckMsgId = 0;
+
+// [STAB] NACKデデュープ用（同じmsg/idxの連打を抑止）
+static uint16_t lastNackIdx = 0xFFFF;
+static uint16_t lastNackMsg = 0xFFFF;
+static unsigned long lastNackAt = 0;
+
+// 受信側（アセンブリ）状態
+struct RxState {
+  bool     active = false;
+  uint16_t msg_id = 0;
+  uint16_t total  = 0;
+  uint16_t len_all= 0;
+  uint32_t crc32_all = 0;
+  bool     got[MAX_CHUNKS];
+  uint16_t gotCount = 0;
+  uint8_t  buf[MAX_MSG_BYTES];
+  // [STAB] 受信側からNACKを送る頻度を抑制
+  unsigned long lastNackTxAt = 0;
+  uint16_t      lastNackTxIdx = 0xFFFF;
+} rx;
+
+// LED表示タイマー（5秒後に消灯）
+unsigned long ledDisplayUntil = 0;
+
+// === Rendezvous/Keepalive 設定 ===
+static const unsigned long FOUND_LOG_DEBOUNCE = 5000;  // 5秒に1回だけログ出力（スパム防止）
+
+// 最終トラフィック時刻（何か受信した/送信した）
+static unsigned long lastTrafficMs = 0;
+// 相手発見ログの出し過ぎ防止
+static unsigned long lastFoundLogMs = 0;
+
+// === RSSI 設定（MACごとに記録・開始時のみ判定） ===
+static const int RSSI_THRESHOLD = -65;  // 交換開始時の閾値
+
+// RSSIをMACごとに記録（直近のみ）
+struct RssiEntry { uint8_t mac[6]; int rssi; unsigned long at; };
+static RssiEntry gRssi[6]; // 近場なら6枠で十分
+
+static int findRssiIndex(const uint8_t mac[6]) {
+  for (int i=0;i<6;i++) {
+    if (memcmp(gRssi[i].mac, mac, 6)==0) return i;
+  }
+  return -1;
+}
+
+static void upsertRssi(const uint8_t mac[6], int rssi){
+  int i = findRssiIndex(mac);
+  if (i<0) { // 空きを探す or 最古を上書き
+    unsigned long oldestAt=0xFFFFFFFF; int idx=0;
+    for (int k=0;k<6;k++){ 
+      if (gRssi[k].at < oldestAt){ 
+        oldestAt=gRssi[k].at; idx=k; 
+      } 
+    }
+    memcpy(gRssi[idx].mac, mac, 6); 
+    gRssi[idx].rssi=rssi; 
+    gRssi[idx].at=millis(); 
+    return;
+  }
+  gRssi[i].rssi = rssi; 
+  gRssi[i].at=millis();
+}
+
+static bool getRssiForMac(const uint8_t mac[6], int* out){
+  int i = findRssiIndex(mac);
+  if (i<0) return false;
+  *out = gRssi[i].rssi; 
+  return true;
+}
+
+static int lastRSSI = 0;                // 最後に受信したRSSI値（後方互換）
+static bool rssiFilterEnabled = true;   // RSSIフィルタリング有効/無効
+
+// 直近で観測した送信元MAC（スニファで更新）
+static uint8_t lastRssiMac[6] = {0};
+static volatile bool lastRssiValid = false;
+
+// 802.11 MACヘッダの簡易構造体（送信元 = addr2）
+typedef struct {
+  uint16_t frame_ctrl;
+  uint16_t duration_id;
+  uint8_t  addr1[6];
+  uint8_t  addr2[6];   // ← 送信元
+  uint8_t  addr3[6];
+  uint16_t seq_ctrl;
+} wifi_ieee80211_hdr_t;
+
+typedef struct {
+  wifi_ieee80211_hdr_t hdr;
+  uint8_t payload[0];
+} wifi_ieee80211_packet_t;
+
+// ===== ユーティリティ =====
+static uint32_t crc32_simple(const uint8_t* p, size_t n){
+  uint32_t c=0xFFFFFFFF;
+  for(size_t i=0;i<n;i++){ c ^= p[i]; for(int k=0;k<8;k++) c = (c>>1) ^ (0xEDB88320 & (-(int)(c & 1))); }
+  return ~c;
+}
+
+static void macToStr(const uint8_t mac[6], char out[18]){
+  sprintf(out,"%02X:%02X:%02X:%02X:%02X:%02X",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]);
+}
+
+bool ensurePeer(const uint8_t mac[6], bool encrypt=false){
+  esp_now_peer_info_t peer{};
+  memcpy(peer.peer_addr, mac, 6);
+  peer.ifidx = WIFI_IF_STA;
+  peer.channel = WIFI_CH;
+  peer.encrypt = encrypt;
+  if (esp_now_is_peer_exist(mac)) return true;
+  esp_err_t r = esp_now_add_peer(&peer);
+  if (r != ESP_OK) {
+    char m[18]; macToStr(mac,m);
+    Serial.printf("[ERR] add_peer %s -> %d\n", m, r);
+  }
+  return r == ESP_OK;
+}
+
+// 受信した全Wi-Fiフレームから RSSI と 送信元MAC を拾う
+static void IRAM_ATTR promiscuous_rx_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
+  const wifi_promiscuous_pkt_t* ppkt = (const wifi_promiscuous_pkt_t*)buf;
+  const wifi_ieee80211_packet_t* ipkt = (const wifi_ieee80211_packet_t*)ppkt->payload;
+  
+  // MACごとにRSSIを記録
+  int rssi = (int)ppkt->rx_ctrl.rssi;
+  upsertRssi(ipkt->hdr.addr2, rssi);
+  
+  // 後方互換用（最後のRSSI）
+  lastRSSI = rssi;
+  memcpy((void*)lastRssiMac, ipkt->hdr.addr2, 6);
+  lastRssiValid = true;
+}
+
+// ★ 新しい交換セッションをはじめる（msg_idを増やす）
+// startNewExchange()は削除（TURN方式で自動的に役割交代）
+
+String loadJsonFromLittleFS(const char* path, size_t maxBytes){
+  if (!LittleFS.begin(true)) {
+    Serial.println("[LittleFS] mount failed（format=trueで再試行）");
+  }
+  if (!LittleFS.exists(path)) {
+    Serial.printf("[LittleFS] %s not found. Use default sample.\n", path);
+    return String(R"({"id":"393235","flag":"photo","note":"default because /payload.json not found"})");
+  }
+  File f = LittleFS.open(path, "r");
+  if (!f || f.isDirectory()) {
+    Serial.printf("[LittleFS] open failed: %s\n", path);
+    return String(R"({"error":"open failed"})");
+  }
+  size_t n = f.size();
+  if (n > maxBytes) {
+    Serial.printf("[LittleFS] file too large (%u > %u). Truncating.\n", (unsigned)n, (unsigned)maxBytes);
+    n = maxBytes;
+  }
+  String s; s.reserve(n);
+  while (f.available() && s.length() < (int)n) s += (char)f.read();
+  f.close();
+  Serial.printf("[LittleFS] loaded %u bytes from %s\n", (unsigned)s.length(), path);
+  return s;
+}
+
+// ===== LEDマトリクス描画関数 =====
+// 反時計回り90°回転で描画
+static void drawRGBArrayRotCCW(const uint8_t* rgb, size_t n) {
+  if (n < NUM_LEDS * 3) return;
+  matrix.fillScreen(0);
+  for (int srcY = 0; srcY < H; srcY++) {
+    for (int srcX = 0; srcX < W; srcX++) {
+      size_t srcIndex = (srcY * W + srcX) * 3;
+      uint8_t r = rgb[srcIndex + 0];
+      uint8_t g = rgb[srcIndex + 1];
+      uint8_t b = rgb[srcIndex + 2];
+      int dstX = srcY;
+      int dstY = W - 1 - srcX;
+      matrix.drawPixel(dstX, dstY, matrix.Color(r, g, b));
+    }
+  }
+  matrix.show();
+}
+
+// 受信JSON（バッファ）から rgb 配列を見つけて描画
+static bool renderFromJson(const uint8_t* buf, size_t len) {
+  // JSONが1KB〜数KBになりうるので少し余裕を確保
+  DynamicJsonDocument doc(8192);
+  DeserializationError err = deserializeJson(doc, buf, len);
+  if (err) {
+    Serial.println("❌ JSON解析エラー");
+    return false;
+  }
+
+  // オプション：明るさ指定があれば反映（0–255）
+  if (doc.containsKey("brightness")) {
+    int br = doc["brightness"].as<int>();
+    br = constrain(br, 0, 255);
+    matrix.setBrightness(br);
+  }
+
+  // パターンA: 直下にrgb配列
+  JsonArray rgbA = doc["rgb"].is<JsonArray>() ? doc["rgb"].as<JsonArray>() : JsonArray();
+
+  // パターンB: records[0].rgb
+  if (rgbA.isNull() && doc["records"].is<JsonArray>() && doc["records"][0]["rgb"].is<JsonArray>()) {
+    rgbA = doc["records"][0]["rgb"].as<JsonArray>();
+  }
+
+  if (rgbA.isNull()) {
+    Serial.println("❌ RGB配列が見つかりません");
+    return false;
+  }
+
+  // 長さチェック（W*H*3）
+  const size_t need = NUM_LEDS * 3;
+  if (rgbA.size() < need) {
+    Serial.printf("❌ RGB配列が短すぎます: %u < %u\n", (unsigned)rgbA.size(), (unsigned)need);
+    return false;
+  }
+
+  // 一時バッファに詰める（必要分だけ）
+  static uint8_t rgbBuf[NUM_LEDS * 3];
+  for (size_t i = 0; i < need; ++i) {
+    rgbBuf[i] = (uint8_t) rgbA[i].as<int>();
+  }
+
+  drawRGBArrayRotCCW(rgbBuf, need);
+  Serial.println("✅ 表示完了");
+  
+  // 5秒後に消灯するタイマーをセット
+  ledDisplayUntil = millis() + 5000;
+  
+  return true;
+}
+
+// ===== 送信関数 =====
+void sendHELLO(){
+  if (!broadcastPeerAdded) {
+    ensurePeer(MAC_BC,false); // 初回のみ追加
+    broadcastPeerAdded = true;
+  }
+  FrameHello f{HELLO};
+  esp_now_send(MAC_BC, (uint8_t*)&f, sizeof(f));
+  // Serial.println("[TX] HELLO (broadcast)");  // 削除（頻繁すぎる）
+}
+
+void sendMETA(const uint8_t mac[6]){
+  FrameMeta m{};
+  m.type = META;
+  m.msg_id = current_msg_id;
+  m.total = tx_total;
+  m.len_all = tx_len_all;
+  m.crc32_all = tx_crc;
+  ensurePeer(mac,false);
+  esp_now_send(mac, (uint8_t*)&m, sizeof(m));
+  // char mm[18]; macToStr(mac, mm);
+  // Serial.printf("[TX] META -> %s total=%u len=%u crc=0x%08X\n", mm, m.total, m.len_all, m.crc32_all);
+  lastProgressMs = millis();
+}
+
+void sendCHUNK(const uint8_t mac[6], uint16_t idx){
+  FrameChunk c{};
+  c.type   = CHUNK;
+  c.msg_id = current_msg_id;
+  c.idx    = idx;
+
+  size_t off = (size_t)idx * CHUNK_DATA_MAX;
+  size_t remain = (tx_len_all > off) ? (tx_len_all - off) : 0;
+  size_t n = remain > CHUNK_DATA_MAX ? CHUNK_DATA_MAX : remain;
+
+  memcpy(c.data, tx_json.c_str() + off, n);
+  c.payload_len = (uint16_t)n;
+
+  esp_now_send(mac, (uint8_t*)&c, sizeof(c.type)+2+2+2 + n);
+  // if (idx % 8 == 0) {
+  //   char mm[18]; macToStr(mac, mm);
+  //   Serial.printf("[TX] CHUNK idx=%u len=%u -> %s\n", idx, c.payload_len, mm);
+  // }
+  lastProgressMs = millis();
+}
+
+void sendACK(const uint8_t mac[6], uint16_t msg_id){
+  ensurePeer(mac, false);                 // ★保険の peer 登録
+  FrameAck a{ACK, msg_id};
+  for (int i=0; i<3; i++){                // ★3連投（電波落ち保険）
+    esp_now_send(mac, (uint8_t*)&a, sizeof(a));
+    delay(2);
+  }
+  // char mm[18]; macToStr(mac, mm);
+  // Serial.printf("[TX] ACK -> %s (msg=%u)\n", mm, msg_id);
+}
+
+void sendNACK(const uint8_t mac[6], uint16_t msg_id, uint16_t missing_idx){
+  ensurePeer(mac, false);                 // ★保険の peer 登録
+  FrameNack n{NACK, msg_id, missing_idx};
+  esp_now_send(mac, (uint8_t*)&n, sizeof(n));
+  lastProgressMs = millis();
+}
+
+void sendTURN(const uint8_t mac[6], uint16_t msg_id) {
+  ensurePeer(mac, false);                 // ★保険の peer 登録
+  FrameTurn t{TURN, msg_id};
+  esp_now_send(mac, (uint8_t*)&t, sizeof(t));
+  Serial.println("🔄 TURN 送信（権利譲渡）");
+}
+
+// ===== 送信セッション開始（唯一の入口） =====
+bool startTxSession(){  // ★ 戻り値bool：本当に送信開始したか
+  Serial.println("📡 送信セッション開始");
+  
+  // msg_id更新
+  current_msg_id++;
+  if (current_msg_id == 0) current_msg_id = 1;
+  
+  // 送信データ準備
+  tx_json = myJson;
+  if (tx_json.length() > MAX_MSG_BYTES) {
+    tx_json = tx_json.substring(0, MAX_MSG_BYTES);
+  }
+  tx_len_all = tx_json.length();
+  tx_crc     = crc32_simple((const uint8_t*)tx_json.c_str(), tx_len_all);
+  tx_total   = (tx_len_all + CHUNK_DATA_MAX - 1) / CHUNK_DATA_MAX;
+  nextIdx = 0;
+  tx_done = false;
+  tx_meta_sent = false;  // ← リセット
+
+  // META送信
+  ensurePeer(peerMac, false);  // 念のため
+  sendMETA(peerMac);
+  lastSendMs = millis();
+  tx_meta_sent = true;  // ← METAを確実に送った
+  Serial.printf("🟢 META送信: msg=%u total=%u len=%u\n", current_msg_id, tx_total, tx_len_all);
+
+  // 先頭バースト（6個）
+  uint16_t burst = min<uint16_t>(tx_total, 6);
+  for(uint16_t i=0;i<burst;i++){
+    sendCHUNK(peerMac, i);
+    delay(3);
+  }
+  
+  return true;  // ← 送信開始OK
+}
+
+// ===== 受信セッション開始 =====
+void startRxSession(const FrameMeta* m){
+  Serial.println("📥 受信セッション開始");
+  
+  // レーダーを停止
+  matrix.fillScreen(0);
+  matrix.show();
+
+  // 受信状態を初期化
+  memset(&rx, 0, sizeof(rx));
+  rx.active = true;
+  rx.msg_id = m->msg_id;
+  rx.total  = m->total;
+  rx.len_all= m->len_all;
+  rx.crc32_all = m->crc32_all;
+
+  lastProgressMs = millis();
+}
+
+// ===== 次チャンク送信 =====
+void sendNextChunk(){
+  if (nextIdx < tx_total){
+    sendCHUNK(peerMac, nextIdx++);
+    lastSendMs = millis();
+  }
+}
+
+
+// ===== コールバック =====
+void onSend(const uint8_t* mac, esp_now_send_status_t s){
+  // コールバックログは削除（頻繁すぎる）
+  // char mm[18]; macToStr(mac, mm);
+  // Serial.printf("[CALLBACK] onSend -> %s status=%s\n", mm, s==ESP_NOW_SEND_SUCCESS?"SUCCESS":"FAIL");
+  lastTrafficMs = millis(); // ★ 送信成功もトラフィックとして扱う
+}
+
+void onRecv(const uint8_t* mac, const uint8_t* data, int len){
+  char mm[18]; macToStr(mac, mm);
+
+  // === MACごとのRSSIを取得（弾かない） ===
+  int rssi = -100;
+  bool hasRssi = getRssiForMac(mac, &rssi);
+
+  // ★ 受信があった＝ネットワークが生きている
+  lastTrafficMs = millis();
+
+  if (len <= 0) return;
+  uint8_t t = data[0];
+
+  // ===== HELLO：探す＆役割選挙のみ（弾かない・再選挙禁止） =====
+  if (t == HELLO){
+    // 相手発見ログのスパム抑制
+    unsigned long nowms = millis();
+    if (nowms - lastFoundLogMs > FOUND_LOG_DEBOUNCE) {
+      const char* distance = 
+        (rssi > -50) ? "非常に近い" :
+        (rssi > -60) ? "近い" :
+        (rssi > -70) ? "中距離" :
+        (rssi > -80) ? "遠い" : "非常に遠い";
+      Serial.printf("🔍 相手発見: %s | RSSI: %d dBm (%s)\n", mm, rssi, distance);
+      lastFoundLogMs = nowms;
+    }
+
+    // 既にペア確定なら何もしない（再選挙しない）
+    if (hasPeer) return;
+
+    // ペア成立＆役割選挙（一度だけ）
+    memcpy(peerMac, mac, 6);
+    
+    uint8_t selfMac[6]; 
+    esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+    
+    isInitiator = (memcmp(selfMac, mac, 6) < 0);
+    txRight = isInitiator;  // 初手：Initiatorに送信権
+    hasPeer = true;
+    
+    ensurePeer(peerMac, false); // ★ ペア登録
+    
+    Serial.printf("🎯 役割決定: %s (MAC比較)\n", 
+                  isInitiator ? "Initiator(送信)" : "Responder(受信)");
+    
+    // ★ 追加：自分がResponderなら、一度だけTURNを送って相手をキック
+    static bool kickSent = false;
+    if (!isInitiator && !kickSent) {
+      sendTURN(peerMac, 0);
+      kickSent = true;
+      Serial.println("🔔 KICK: Responder→Initiator に TURN 送信");
+    }
+    
+    return;
+  }
+
+  // ===== HELLO以外は相手確定後に厳格フィルタ =====
+  if (hasPeer && memcmp(mac, peerMac, 6) != 0) {
+    return; // 他人のフレームは無視
+  }
+
+  // ===== META：受信側のみ反応 =====
+  if (t == META && len >= (int)sizeof(FrameMeta)){
+    if (!txRight) {  // ★ 自分が受信側の時だけ
+      const FrameMeta* m = (const FrameMeta*)data;
+      startRxSession(m);
+    }
+    return;
+  }
+
+  // ===== CHUNK：受信中のみ取り込み（NACK駆動） =====
+  if (t == CHUNK && len >= (int)(sizeof(uint8_t)+2+2+2)){
+    const FrameChunk* c = (const FrameChunk*)data;
+
+    if (!rx.active || c->msg_id != rx.msg_id) {
+      return;  // 無視（孤児CHUNKは放置）
+    }
+
+    // 重複スキップ
+    if (c->idx < MAX_CHUNKS && rx.got[c->idx]) {
+      lastProgressMs = millis();
+      return;
+    }
+
+    // バリデーション
+    if (c->idx >= rx.total || c->payload_len > CHUNK_DATA_MAX) {
+      return;
+    }
+
+    size_t off = (size_t)c->idx * CHUNK_DATA_MAX;
+    size_t can = rx.len_all - off;
+    if (c->payload_len > can) {
+      return;
+    }
+
+    // データ取り込み
+    memcpy(rx.buf + off, c->data, c->payload_len);
+    if (!rx.got[c->idx]) { rx.got[c->idx] = true; rx.gotCount++; }
+
+    // 進捗表示（10%刻み）
+    static uint16_t lastReportedPercent = 0;
+    uint16_t percent = (rx.gotCount * 100) / rx.total;
+    if (percent >= lastReportedPercent + 10 || rx.gotCount == rx.total) {
+      Serial.printf("📦 受信中: %u%%\n", percent);
+      lastReportedPercent = percent;
+    }
+
+    lastProgressMs = millis();
+
+
+    // 欠落チェック（最初の1個だけNACK）
+    if (rx.gotCount < rx.total){
+      for(uint16_t i=0;i<rx.total;i++){
+        if (!rx.got[i]){
+          // スロットリング（30ms間隔）
+          unsigned long nowms = millis();
+          if (!(rx.lastNackTxIdx == i && (nowms - rx.lastNackTxAt) < 30)) {
+            sendNACK(mac, rx.msg_id, i);
+            rx.lastNackTxIdx = i;
+            rx.lastNackTxAt  = nowms;
+          }
+          break;  // 最初の欠落のみ
+        }
+      }
+    } else {
+      // 全部揃った → CRC確認
+      uint32_t csum = crc32_simple(rx.buf, rx.len_all);
+      if (csum == rx.crc32_all){
+        sendACK(mac, rx.msg_id);
+        lastAckSentAt = millis();         // ★ACK再送用タイマ記録
+        lastAckMsgId  = rx.msg_id;        // ★ACK再送用msg_id記録
+        Serial.println("✅ 受信完了");
+        
+        // 受信完了エフェクト
+        Ripple_PlayOnce();
+        
+        renderFromJson(rx.buf, rx.len_all);   // 受信JSONからLEDに描画
+
+        rx.active = false;
+        lastReportedPercent = 0;  // リセット
+      } else {
+        Serial.println("❌ CRCエラー - 最初から再送要求");
+        sendNACK(mac, rx.msg_id, 0);
+      }
+    }
+    return;
+  }
+
+  // ===== NACK：送信側が指定idxだけ再送 =====
+  if (t == NACK && len >= (int)sizeof(FrameNack)){
+    const FrameNack* n = (const FrameNack*)data;
+
+    // 重複抑制（50ms）
+    unsigned long nowms = millis();
+    if (n->msg_id == lastNackMsg && n->missing_idx == lastNackIdx && (nowms - lastNackAt) < 50) {
+      return;
+    }
+    lastNackMsg = n->msg_id; lastNackIdx = n->missing_idx; lastNackAt = nowms;
+
+    if (n->msg_id == current_msg_id && n->missing_idx < tx_total){
+      sendCHUNK(mac, n->missing_idx);
+      // 近傍1個も補助再送
+      if (n->missing_idx + 1 < tx_total) sendCHUNK(mac, n->missing_idx + 1);
+    }
+    lastProgressMs = millis();
+    return;
+  }
+
+  // ===== ACK：送信完了 → TURN送信（双方向・確実に） =====
+  if (t == ACK && len >= (int)sizeof(FrameAck)){
+    const FrameAck* a = (const FrameAck*)data;
+    if (a->msg_id == current_msg_id){
+      tx_done = true;
+      Serial.println("✅ 送信完了");
+
+      // 相手へ権利譲渡
+      sendTURN(peerMac, current_msg_id);
+      txRight = false;      // 自分は権利放棄
+      txLaunched = false;   // 自分のセッションは終了
+    }
+    lastProgressMs = millis();
+    return;
+  }
+
+  // ===== TURN：権利獲得（次ループで送信開始へ） =====
+  if (t == TURN && len >= (int)sizeof(FrameTurn)){
+    // まだペア不明ならここで確定（TURNで合流できる）
+    if (!hasPeer) {
+      memcpy(peerMac, mac, 6);
+      uint8_t selfMac[6]; 
+      esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+      isInitiator = (memcmp(selfMac, mac, 6) < 0);
+      hasPeer = true;
+      ensurePeer(peerMac, false);
+      Serial.println("🤝 TURNでペア確定");
+    }
+    
+    Serial.println("🔄 TURN 受信（権利獲得）");
+    txRight = true;         // 権利獲得
+    txLaunched = false;     // ★ 重要：次のloopでstartTxSession()を呼べる状態に
+    
+    // msg_idは送信側が更新（任意だが分かりやすく）
+    current_msg_id++;
+    if (current_msg_id == 0) current_msg_id = 1;
+    
+    return;
+  }
+
+  // Serial.printf("[RX] Unknown type=%u len=%d from %s\n", t, len, mm);
+}
+
+// ===== セットアップ/ループ =====
+void setup(){
+  Serial.begin(115200);
+  delay(200);
+
+  Serial.println("\n========================================");
+  Serial.println("   ESP-NOW データ交換 & LED表示");
+  Serial.println("========================================\n");
+
+  // === LEDマトリクス初期化 ===
+  matrix.begin();
+  matrix.setBrightness(GLOBAL_BRIGHTNESS);
+  matrix.fillScreen(0);
+  matrix.show();
+  Serial.println("✅ LEDマトリクス初期化完了");
+
+  // 起動時エフェクト
+  Serial.println("💫 起動エフェクト...");
+  Ripple_PlayOnce();
+
+  // LittleFSからJSONをロード
+  myJson = loadJsonFromLittleFS(JSON_PATH, MAX_MSG_BYTES);
+  Serial.printf("📄 JSON読込: %u バイト\n", (unsigned)myJson.length());
+
+  // 起動時に自分のJSONで描画（任意）
+  Serial.println("💡 起動時表示...");
+  renderFromJson((const uint8_t*)myJson.c_str(), myJson.length());
+
+  // Wi-Fi/ESP-NOW初期化
+  WiFi.mode(WIFI_STA);
+
+  // （任意）国設定：日本
+  wifi_country_t ctry = { .cc="JP", .schan=1, .nchan=13, .max_tx_power=20, .policy=WIFI_COUNTRY_POLICY_MANUAL };
+  esp_wifi_set_country(&ctry);
+
+  // ★ プロミスキャスを常時ONにしてRSSIを取る
+  wifi_promiscuous_filter_t filt;
+  filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
+  esp_wifi_set_promiscuous_filter(&filt);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&promiscuous_rx_cb);
+
+  // 固定チャネル
+  esp_wifi_set_channel(WIFI_CH, WIFI_SECOND_CHAN_NONE);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("❌ ESP-NOW初期化失敗");
+    while(true){ delay(1000); }
+  }
+  Serial.println("✅ ESP-NOW初期化完了");
+  esp_now_register_send_cb(onSend);
+  esp_now_register_recv_cb(onRecv);
+
+  // 起動情報（チャネル/自MAC）
+  uint8_t ch; wifi_second_chan_t sc;
+  esp_wifi_get_channel(&ch, &sc);
+  Serial.printf("📡 MAC: %s | CH: %u\n\n", WiFi.macAddress().c_str(), ch);
+  Serial.println("🔍 相手を探しています...\n");
+
+  // 相手探索エフェクト（レーダー初期化）
+  Radar_InitIdle();
+
+  // 初期HELLO
+  lastHelloMs = millis() - 2000;  // 起動直後に一度HELLO
+  lastProgressMs = millis();
+  lastTrafficMs = millis();  // トラフィック時刻の初期化
+}
+
+void loop(){
+  unsigned long now = millis();
+
+  // LED消灯タイマーチェック（5秒後に消灯してレーダー再開）
+  if (ledDisplayUntil > 0 && now >= ledDisplayUntil) {
+    matrix.fillScreen(0);
+    matrix.show();
+    Serial.println("💤 LED消灯");
+    ledDisplayUntil = 0;
+    
+    // レーダー再開（受信中でなければ）
+    if (!rx.active) {
+      Radar_InitIdle();
+    }
+  }
+
+  // レーダーモーション更新（受信中・表示中以外は常に表示）
+  bool shouldShowRadar = !rx.active && ledDisplayUntil == 0;
+  if (shouldShowRadar) {
+    Radar_IdleStep(true);
+    delay(16);  // 約60fps
+  }
+
+  // ===== シンプル4行ループ（トークン制） =====
+  
+  // 1) HELLO：ペア未成立の間だけ 400ms間隔で送る
+  if (!hasPeer && now - lastHelloMs > 400) {
+    sendHELLO();
+    lastHelloMs = now;
+  }
+
+  // 2) 送信権あり & 未開始 → 送信開始（距離ゲート内蔵・再挑戦可能）
+  if (hasPeer && txRight && !txLaunched) {
+    bool started = startTxSession();  // 実際に蹴れたか
+    if (started && tx_meta_sent) {
+      txLaunched = true;              // 本当にMETAを出せた時だけtrue
+      Serial.println("🚀 送信開始フラグ txLaunched=true");
+    } else {
+      // 未開始（距離NGなど）→ 次ループで再挑戦（txLaunchedはfalseのまま）
+    }
+  }
+
+  // 3) 送信中：35ms間隔で次チャンクを送る
+  if (hasPeer && !tx_done && txLaunched && now - lastSendMs > 35) {
+    sendNextChunk();
+  }
+
+  // 4) フォールバック：TURN喪失時の保険（任意・軽量）
+  static unsigned long lastActivityCheck = 0;
+  if (hasPeer && !txRight && !rx.active && (now - lastActivityCheck > 2000)) {
+    // 相手の番が長く止まっている → 軽くHELLOを1発送って再同期
+    // （通常は不要だが、TURNだけ落ちた時の保険）
+    lastActivityCheck = now;
+  }
+  
+  // 5) ACK再送：Responderが受信完了したのにTURNが来ない場合の保険
+  if (!txRight && !rx.active && lastAckMsgId != 0 && now - lastAckSentAt > 400) {
+    // TURNが来ない＝相手がACKを落とした疑い
+    sendACK(peerMac, lastAckMsgId);     // 3連投バースト版が呼ばれる
+    lastAckSentAt = now;
+    Serial.println("📣 ACK再送（TURN待ち）");
+  }
+}
