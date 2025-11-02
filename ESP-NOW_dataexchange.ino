@@ -10,9 +10,14 @@
 
 #include "Motion.h"        // Radar/Ripple 用
 #include "Display_image.h" // LED表示モジュール
+#include "Display_text.h"  // テキストスクロール表示
 
 /***** ========== LED MATRIX ========== *****/
 #define GLOBAL_BRIGHTNESS 10
+
+// テキストスクロール設定
+static const uint16_t TEXT_FRAME_DELAY_MS = 50;  // スクロール速度(1ステップの遅延)
+static const uint8_t  TEXT_BRIGHTNESS     = 20;  // テキスト時の明るさ
 
 /***** ========== 無線・ファイル設定 ========== *****/
 static const int WIFI_CH = 6;
@@ -154,6 +159,60 @@ String loadJsonFromLittleFS(const char* path, size_t maxBytes){
   f.close();
   Serial.printf("[LittleFS] loaded %u bytes\n", (unsigned)s.length());
   return s;
+}
+
+/***** ========== Flagルータ（画像/テキスト振り分け） ========== *****/
+// 受信バッファ(JSON)を見て image/text を出し分けて表示する
+bool ShowByFlag_Route(const uint8_t* buf, size_t len) {
+  if (!buf || len == 0) return false;
+
+  DynamicJsonDocument doc(8192);
+  if (deserializeJson(doc, buf, len)) {
+    Serial.println("❌ JSON parse (router)");
+    return false;
+  }
+
+  // flagの取得（"image" / "text" を想定。"photo" を互換として同扱い）
+  String flag = doc["flag"] | "";
+  flag.toLowerCase();
+
+  if (flag == "image" || flag == "photo") {
+    return Display_ShowFromJson(buf, len, DISPLAY_MS);
+  }
+
+  if (flag == "text") {
+    // テキスト本文の取り出し
+    const char* text = nullptr;
+    if (doc["text"].is<const char*>()) {
+      text = doc["text"].as<const char*>();
+    } else if (doc["records"].is<JsonArray>() && doc["records"][0]["text"].is<const char*>()) {
+      text = doc["records"][0]["text"].as<const char*>();
+    }
+
+    if (!text || !*text) {
+      Serial.println("❌ no text field for flag=text");
+      return false;
+    }
+
+    // 任意の明るさ（JSONにbrightnessがあれば優先）
+    uint8_t tb = TEXT_BRIGHTNESS;
+    if (doc.containsKey("brightness")) {
+      tb = constrain(doc["brightness"].as<int>(), 0, 255);
+    }
+    Matrix_SetTextBrightness(tb);
+
+    // スクロール所要時間を見積 → その間は受信抑止ガードを張る
+    const unsigned long dur = Text_EstimateDurationMs(text, TEXT_FRAME_DELAY_MS);
+    if (dur) Display_BlockFor(dur);
+
+    // スクロール実行（ブロッキング）
+    Text_PlayOnce(text, TEXT_FRAME_DELAY_MS);
+    return true;
+  }
+
+  // 未知のflag → 画像扱いにフォールバック
+  Serial.printf("⚠️ unknown flag='%s' → image fallback\n", flag.c_str());
+  return Display_ShowFromJson(buf, len, DISPLAY_MS);
 }
 
 /***** ========== 送信関連 ========== *****/
@@ -302,7 +361,11 @@ void onRecv(const uint8_t* mac, const uint8_t* data, int len){
       if (csum == rx.crc32_all){
         sendACK(mac, rx.msg_id); Serial.println("✅ 受信完了");
         Ripple_PlayOnce();                 // 完了エフェクト
-        Display_ShowFromJson(rx.buf, rx.len_all, DISPLAY_MS);// LED表示
+        // flagを見て image/text を出し分けて表示
+        if (!ShowByFlag_Route(rx.buf, rx.len_all)) {
+          // 失敗時は画像表示にフォールバック
+          Display_ShowFromJson(rx.buf, rx.len_all, DISPLAY_MS);
+        }
         rx.active = false; lastPct = 0;
       } else {
         Serial.println("❌ CRC - NACK(0)");
@@ -342,13 +405,19 @@ void setup(){
 
   // LED
   Display_Init(GLOBAL_BRIGHTNESS);
+  Matrix_Init();  // テキスト表示モジュール初期化
   Serial.println("✅ LED初期化");
 
   // 起動演出 → 自分のJSON表示
   Serial.println("💫 起動Ripple"); Ripple_PlayOnce();
   myJson = loadJsonFromLittleFS(JSON_PATH, MAX_MSG_BYTES);
   Serial.printf("📄 JSON %u bytes\n", (unsigned)myJson.length());
-  Serial.println("💡 起動表示"); Display_ShowFromJson((const uint8_t*)myJson.c_str(), myJson.length(), DISPLAY_MS);
+  Serial.println("💡 起動表示");
+  // ルータ経由（flag=image/text の両方に対応）
+  if (!ShowByFlag_Route((const uint8_t*)myJson.c_str(), myJson.length())) {
+    // 失敗時はフェールセーフで画像表示にフォールバック
+    Display_ShowFromJson((const uint8_t*)myJson.c_str(), myJson.length(), DISPLAY_MS);
+  }
 
   // WiFi/ESP-NOW
   WiFi.mode(WIFI_STA);

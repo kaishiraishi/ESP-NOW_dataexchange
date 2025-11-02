@@ -106,3 +106,9 @@ bool Display_EndIfExpired() {
   }
   return false;
 }
+
+void Display_BlockFor(unsigned long ms) {
+  if (ms == 0) { return; }
+  // 何も描画しないが、受信抑止フラグとして until を張る
+  s_until_ms = millis() + ms;
+}

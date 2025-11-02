@@ -43,3 +43,6 @@ bool Display_IsActive();
 // 期限切れなら内部で消灯し true を返す（エッジ検出用途）
 // 期限内/すでに消えているなら false
 bool Display_EndIfExpired();
+
+// 何も描画せずに「表示中ガード」だけ張る（ms）
+void Display_BlockFor(unsigned long ms);
