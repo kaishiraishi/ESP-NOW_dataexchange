@@ -16,3 +16,11 @@ void Comm_SendJsonBroadcast(const String& json);
 // === 受信後の処理フロー（アプリケーション責務） ===
 // 実装例：Json_Handler + DisplayManager + Motion を使った表示フロー
 void Comm_DefaultMessageHandler(const uint8_t* data, size_t len);
+
+// 直近で受信したパケットのRSSI(dBm)を返す。
+// 取得不可な環境/未受信時は -128 を返す。
+int Comm_GetLastRssi();
+
+// 受信許可する最小RSSIしきい値(dBm)。既定は -40。
+void Comm_SetMinRssiToAccept(int dbm);
+int  Comm_GetMinRssiToAccept();

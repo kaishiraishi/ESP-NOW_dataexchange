@@ -44,16 +44,12 @@ extern std::vector<uint8_t> rgbData;
  */
 void loadDisplayDataFromJson();
 
-/**
- * 受信したJSONバイト列をLittleFS /data.json に保存
- * 上書きモード(w)でファイルを開く
- */
-void saveIncomingJson(const uint8_t* data, size_t len);
+// メモリ上のJSON文字列から displayFlag/displayText/rgbData を抽出してセット
+// 成功なら true
+bool loadDisplayDataFromJsonString(const String& jsonString);
 
-/**
- * 受信JSONをString形式で保存（互換性用）
- */
-void saveIncomingJsonString(const String& json);
+// 受信JSONをRAMリングバッファへ（実装は上の宣言と同じ関数）
+void saveIncomingJson(const uint8_t* data, size_t len);
 
 /**
  * 現在のdisplayFlagを取得

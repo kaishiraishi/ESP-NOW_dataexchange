@@ -26,6 +26,9 @@ struct ChunkHdr {
 static uint8_t s_selfMac[6] = {0};
 static uint16_t s_msgId = 1;
 static CommOnMessageCB s_onMessage = nullptr;
+static volatile int s_lastRssi = -128; // 未取得/非対応時は -128 を保持
+// 受信許可最小RSSI。既定はフィルタ無効（-128）。.ino から Comm_SetMinRssiToAccept() で設定してください。
+static volatile int s_minRssiAccept = -128;
 
 // 受信再構成バッファ
 static struct RxState {
@@ -93,6 +96,18 @@ static void onSent(const wifi_tx_info_t* info, esp_now_send_status_t status) {
 }
 static void onRecv(const esp_now_recv_info* info, const uint8_t* data, int len) {
   const uint8_t* mac = (info && info->src_addr) ? info->src_addr : nullptr;
+  // RSSIを取得（利用可能な場合）
+  if (info && info->rx_ctrl) {
+    s_lastRssi = (int)info->rx_ctrl->rssi; // dBm
+    // しきい値より弱ければ破棄
+    if (s_lastRssi < s_minRssiAccept) {
+      // 任意: 短いログ
+      // Serial.printf("[ESP-NOW] drop by RSSI %d dBm\n", s_lastRssi);
+      return;
+    }
+  } else {
+    s_lastRssi = -128;
+  }
   handleRecv(mac, data, len);
 }
 #else
@@ -101,6 +116,8 @@ static void onSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
   (void)mac_addr; (void)status;
 }
 static void onRecv(const uint8_t* mac_addr, const uint8_t* data, int len) {
+  // 旧APIではRSSIが渡されないため不明扱い
+  s_lastRssi = -128;
   handleRecv(mac_addr, data, len);
 }
 #endif
@@ -126,6 +143,17 @@ void Comm_Init(int wifiChannel) {
     p.encrypt = false;
     esp_now_add_peer(&p);
   }
+}
+
+int Comm_GetLastRssi() {
+  return (int)s_lastRssi;
+}
+
+void Comm_SetMinRssiToAccept(int dbm) {
+  s_minRssiAccept = dbm;
+}
+int Comm_GetMinRssiToAccept() {
+  return (int)s_minRssiAccept;
 }
 
 void Comm_SetOnMessage(CommOnMessageCB cb) {

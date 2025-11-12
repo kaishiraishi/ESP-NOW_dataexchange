@@ -66,6 +66,14 @@ void Clear() {
   s_until_ms = 0;
 }
 
+void AllOn(uint8_t brightness) {
+  // 指定輝度で白一色を表示
+  s_matrix.setBrightness(brightness);
+  s_matrix.fillScreen(s_matrix.Color(255, 255, 255));
+  s_matrix.show();
+  // ガードはここでは張らない（呼び出し側で必要なら BlockFor を使う）
+}
+
 bool ShowRGBRotCCW(const uint8_t* rgb, size_t n, unsigned long display_ms) {
   if (!rgb) return false;
   if (n < (size_t)(DISP_W * DISP_H * 3)) return false;

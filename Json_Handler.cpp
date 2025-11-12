@@ -87,6 +87,36 @@ void loadDisplayDataFromJson() {
     }
 }
 
+bool loadDisplayDataFromJsonString(const String& jsonString) {
+    if (jsonString.isEmpty()) return false;
+    StaticJsonDocument<2048> doc;
+    DeserializationError err = deserializeJson(doc, jsonString);
+    if (err) return false;
+    JsonObject obj = doc.as<JsonObject>();
+    if (!obj) return false;
+
+    displayFlag = obj["flag"] | "";
+
+    if (displayFlag == "text") {
+        displayText = obj["text"] | "";
+        rgbData.clear();
+        return true;
+    } else if (displayFlag == "image") {
+        displayText.clear();
+        rgbData.clear();
+        JsonArray arr = obj["rgb"];
+        if (!arr.isNull()) {
+            for (auto v : arr) rgbData.push_back((uint8_t)v.as<int>());
+        }
+        return true;
+    } else {
+        // 未知のフラグ
+        displayText.clear();
+        rgbData.clear();
+        return false;
+    }
+}
+
 String loadJsonFromPath(const char* path, size_t maxBytes) {
     if (!LittleFS.begin(false)) LittleFS.begin(true);
     if (!LittleFS.exists(path)) return String();

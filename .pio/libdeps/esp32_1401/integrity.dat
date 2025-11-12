@@ -1,4 +1,5 @@
-adafruit/Adafruit NeoPixel@^1.12.0
-adafruit/Adafruit NeoMatrix@^1.3.2
+mathertel/OneButton
 bblanchon/ArduinoJson@^6.21.4
+adafruit/Adafruit NeoMatrix@^1.3.2
 adafruit/Adafruit GFX Library@^1.11.9
+adafruit/Adafruit NeoPixel@^1.12.0

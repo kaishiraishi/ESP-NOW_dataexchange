@@ -31,6 +31,8 @@ namespace DisplayManager {
   // === 画像表示 ===
   bool ShowRGBRotCCW(const uint8_t* rgb, size_t n, unsigned long display_ms);
   void Clear();
+  // 全点灯（白）
+  void AllOn(uint8_t brightness);
 
   // === 表示状態管理（ガード） ===
   bool IsActive();              // 表示中ガードが張られているか
