@@ -4,7 +4,7 @@
 #pragma once
 #include <Arduino.h>
 #include <Adafruit_NeoMatrix.h>
-#include "DisplayManager.h"
+#include "Display_Manager.h"
 
 // Motion.cppで参照するMatrixはDisplayManager経由で提供
 using DisplayManager::Matrix;

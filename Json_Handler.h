@@ -6,6 +6,27 @@
 #include <ArduinoJson.h>
 #include <vector>
 
+// ========== 受信インボックス（RAMリングバッファ） ==========
+// 直近N件だけRAMに保持（フラッシュ書き込み寿命に影響しない）
+// - i=0 は最古、i=size-1 は最新
+// - 保存内容: 受信時刻(millis)、JSON文字列
+struct InboxItem {
+	unsigned long atMillis;
+	String json;
+};
+
+// 受信したJSONバイト列をインボックスへ追加（RAMリングバッファ）
+void saveIncomingJson(const uint8_t* data, size_t len);
+
+// インボックス件数を取得
+size_t inboxSize();
+
+// i番目の要素を取得（0=最古）。成功ならtrue
+bool inboxGet(size_t index, InboxItem& out);
+
+// 全削除
+void inboxClear();
+
 // ========== 表示設定定数（.ino で定義） ==========
 extern uint16_t TEXT_FRAME_DELAY_MS;  // テキストスクロール速度 [ms]
 extern uint8_t TEXT_BRIGHTNESS;       // テキスト表示時の明るさ

@@ -1,9 +1,60 @@
 #include "Json_Handler.h"
-#include "DisplayManager.h"
+#include "Display_Manager.h"
 
 String displayFlag;
 String displayText;
 std::vector<uint8_t> rgbData;
+
+// ===== インボックス（RAMリングバッファ）実装 =====
+namespace {
+    static constexpr size_t kInboxCapacity = 20; // 直近20件
+    struct InboxSlot { unsigned long at; String json; };
+    static InboxSlot sInbox[kInboxCapacity];
+    static size_t sHead = 0;   // 先頭（最古）のインデックス
+    static size_t sCount = 0;  // 現在件数
+
+    static size_t advance(size_t i) { return (i + 1) % kInboxCapacity; }
+}
+
+void saveIncomingJson(const uint8_t* data, size_t len) {
+    if (!data || len == 0) return;
+    String js;
+    js.reserve(len + 1);
+    js.concat((const char*)data, len);
+
+    if (sCount < kInboxCapacity) {
+        // 空きがある: 末尾に追加
+        size_t tail = (sHead + sCount) % kInboxCapacity;
+        sInbox[tail].at = millis();
+        sInbox[tail].json = js;
+        sCount++;
+    } else {
+        // 一杯: 最古を上書き（ヘッドを進める）
+        sInbox[sHead].at = millis();
+        sInbox[sHead].json = js;
+        sHead = advance(sHead);
+    }
+}
+
+size_t inboxSize() { return sCount; }
+
+bool inboxGet(size_t index, InboxItem& out) {
+    if (index >= sCount) return false;
+    size_t pos = (sHead + index) % kInboxCapacity;
+    out.atMillis = sInbox[pos].at;
+    out.json = sInbox[pos].json; // コピー（必要なら参照化も可能）
+    return true;
+}
+
+void inboxClear() {
+    for (size_t i = 0; i < sCount; ++i) {
+        size_t pos = (sHead + i) % kInboxCapacity;
+        sInbox[pos].json = String();
+        sInbox[pos].at = 0;
+    }
+    sHead = 0;
+    sCount = 0;
+}
 
 static JsonObject parseJsonFile(const char* path) {
     if (!LittleFS.begin(false)) LittleFS.begin(true);
@@ -33,16 +84,6 @@ void loadDisplayDataFromJson() {
     } else {
         displayText.clear();
         rgbData.clear();
-    }
-}
-
-void saveIncomingJson(const uint8_t* data, size_t len) {
-    if (!data || len == 0) return;
-    if (!LittleFS.begin(false)) LittleFS.begin(true);
-    File file = LittleFS.open("/data.json", "w");
-    if (file) {
-        file.write(data, len);
-        file.close();
     }
 }
 
@@ -80,9 +121,7 @@ bool performDisplay() {
     return false;
 }
 
-void saveIncomingJsonString(const String& json) {
-    if (!json.isEmpty()) saveIncomingJson((const uint8_t*)json.c_str(), json.length());
-}
+
 
 const char* getDisplayFlag() {
     return displayFlag.c_str();

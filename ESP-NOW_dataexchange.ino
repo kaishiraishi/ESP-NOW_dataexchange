@@ -9,7 +9,7 @@
 #include <ArduinoJson.h>
 
 #include "Motion.h"         // Radar/Ripple 用
-#include "DisplayManager.h" // LED表示統合モジュール
+#include "Display_Manager.h" // LED表示統合モジュール
 #include "Json_Handler.h"   // JSON読み込み・保存管理
 #include "Comm_EspNow.h"    // 通信シーケンス外部化
 
@@ -30,7 +30,7 @@ String myJson;
 /***** ========== 受信フロー（保存→表示） ========== *****/
 static void OnMessageReceived(const uint8_t* data, size_t len) {
   // 保存→ガード→演出→解析→表示→待機
-  saveIncomingJson(data, len);
+  saveIncomingJson(data, len); // RAMリングバッファへ保存（直近N件）
   DisplayManager::BlockFor(1600);
   Ripple_PlayOnce();
   loadDisplayDataFromJson();
@@ -57,7 +57,7 @@ void setup(){
     performDisplay();
   }
 
-  // ESP-NOW（通信外部モジュール）
+  // ESP-NOWコールバック登録
   Comm_SetOnMessage(OnMessageReceived);
   Comm_Init(WIFI_CH);
 
