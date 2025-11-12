@@ -111,7 +111,7 @@ void Comm_Init(int wifiChannel) {
   esp_wifi_get_mac(WIFI_IF_STA, s_selfMac);
 
   if (esp_now_init() != ESP_OK) {
-    // 致命的: ここでは何もしない（呼び出し側で再起動等）
+    
     return;
   }
 
@@ -136,11 +136,11 @@ void Comm_SendJsonBroadcast(const String& json) {
   const size_t L = json.length();
   if (L == 0) return;
 
-  if (L <= 250) {
+  if (L <= 250) {// 単発送信
     esp_now_send(MAC_BC, (const uint8_t*)json.c_str(), L);
     return;
   }
-
+  // 分割送信
   const uint16_t total = (L + CHUNK_MAX - 1) / CHUNK_MAX;
   if (total > MAX_CHUNKS) return;
 
@@ -153,7 +153,7 @@ void Comm_SendJsonBroadcast(const String& json) {
     uint16_t n = (uint16_t)min((size_t)CHUNK_MAX, L - off);
 
     ChunkHdr* h = (ChunkHdr*)packet;
-    h->tag   = 'C';
+    h->tag   = 'C';//分割ですよフラグ
     h->msgId = myId;
     h->total = total;
     h->idx   = i;
@@ -165,9 +165,3 @@ void Comm_SendJsonBroadcast(const String& json) {
   }
 }
 
-// === デフォルト受信処理：保存→解析→表示フロー ===
-void Comm_DefaultMessageHandler(const uint8_t* data, size_t len) {
-  if (!data || len == 0) return;
-
-
-}
