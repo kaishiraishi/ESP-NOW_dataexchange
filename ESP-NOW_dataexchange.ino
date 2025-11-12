@@ -255,7 +255,7 @@ void onRecv(const esp_now_recv_info_t* info, const uint8_t* data, int len) {
 /***** ========== Arduino 標準 ========== *****/
 void setup(){
   Serial.begin(115200); delay(200);
-  Serial.println("\n=== ESP-NOW JSON Broadcast (no HELLO/ACK) ===");
+  Serial.println("\n=== ESP-NOW JSON Broadcast ===");
 
   // LED
   Display_Init(GLOBAL_BRIGHTNESS);
