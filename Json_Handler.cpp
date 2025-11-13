@@ -67,28 +67,31 @@ static JsonObject parseJsonFile(const char* path) {
     return doc.as<JsonObject>();
 }
 
-void loadDisplayDataFromJson() {
+bool loadDisplayFromLittleFS() {
     JsonObject obj = parseJsonFile("/data.json");
-    if (!obj) return;
+    if (!obj) return false;
     
     displayFlag = obj["flag"] | "";
     
     if (displayFlag == "text") {
         displayText = obj["text"] | "";
         rgbData.clear();
+        return true;
     } else if (displayFlag == "image" || displayFlag == "emoji") {
         displayText.clear();
         rgbData.clear();
         JsonArray arr = obj["rgb"];
         Serial.println(arr.size());
         for (auto v : arr) rgbData.push_back((uint8_t)v.as<int>());
+        return true;
     } else {
         displayText.clear();
         rgbData.clear();
+        return false;
     }
 }
 
-bool loadDisplayDataFromJsonString(const String& jsonString) {
+bool loadDisplayFromJsonString(const String& jsonString) {
     if (jsonString.isEmpty()) return false;
     StaticJsonDocument<2048> doc;
     DeserializationError err = deserializeJson(doc, jsonString);
@@ -139,18 +142,14 @@ bool performDisplay() {
         if (displayText.isEmpty()) return false;
         DisplayManager::SetTextBrightness(TEXT_BRIGHTNESS);
         unsigned long dur = DisplayManager::TextEstimateDurationMs(displayText.c_str(), TEXT_FRAME_DELAY_MS);
-        if (dur) DisplayManager::BlockFor(dur);
+        if (dur != 0) DisplayManager::BlockFor(dur);
         DisplayManager::TextPlayOnce(displayText.c_str(), TEXT_FRAME_DELAY_MS);
         return true;
     }
     
     if (flag == "image" || flag == "photo" || flag == "emoji") {
         if (rgbData.empty()) return false;
-        // 任意のサイズに対応するが、データはRGB(3要素)の倍数であるべき
-        if ((rgbData.size() % 3) != 0) {
-            Serial.printf("[DISPLAY] rgbData size (%u) is not multiple of 3\n", (unsigned)rgbData.size());
-        }
-        return DisplayManager::ShowRGBRotCCW(rgbData.data(), rgbData.size(), 3000);
+        return DisplayManager::ShowRGB(rgbData.data(), rgbData.size(), 3000);
     }
     
     return false;

@@ -74,10 +74,21 @@ void AllOn(uint8_t brightness) {
   // ガードはここでは張らない（呼び出し側で必要なら BlockFor を使う）
 }
 
-bool ShowRGBRotCCW(const uint8_t* rgb, size_t n, unsigned long display_ms) {
+bool ShowRGB(const uint8_t* rgb, size_t n, unsigned long display_ms) {
   if (!rgb) return false;
   if (n < (size_t)(DISP_W * DISP_H * 3)) return false;
-  drawRGBArrayRotCCW(rgb, n);
+
+  s_matrix.fillScreen(0);
+  for (int sy = 0; sy < DISP_H; ++sy) {
+    for (int sx = 0; sx < DISP_W; ++sx) {
+      size_t i = (size_t)(sy * DISP_W + sx) * 3;
+      int dx = sy;
+      int dy = DISP_W - 1 - sx; // 90°CCW
+      s_matrix.drawPixel(dx, dy, s_matrix.Color(rgb[i], rgb[i+1], rgb[i+2]));
+    }
+  }
+  s_matrix.show();
+
   s_until_ms = millis() + display_ms;
   return true;
 }

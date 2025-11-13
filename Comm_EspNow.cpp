@@ -99,10 +99,7 @@ static void onRecv(const esp_now_recv_info* info, const uint8_t* data, int len) 
   // RSSIを取得（利用可能な場合）
   if (info && info->rx_ctrl) {
     s_lastRssi = (int)info->rx_ctrl->rssi; // dBm
-    // しきい値より弱ければ破棄
     if (s_lastRssi < s_minRssiAccept) {
-      // 任意: 短いログ
-      // Serial.printf("[ESP-NOW] drop by RSSI %d dBm\n", s_lastRssi);
       return;
     }
   } else {

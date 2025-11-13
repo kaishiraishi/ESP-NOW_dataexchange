@@ -30,6 +30,8 @@ namespace DisplayManager {
 
   // === 画像表示 ===
   bool ShowRGBRotCCW(const uint8_t* rgb, size_t n, unsigned long display_ms);
+  // 非回転版（互換用ラッパー）。必要に応じて内部で回転描画に委譲
+  bool ShowRGB(const uint8_t* rgb, size_t n, unsigned long display_ms);
   void Clear();
   // 全点灯（白）
   void AllOn(uint8_t brightness);

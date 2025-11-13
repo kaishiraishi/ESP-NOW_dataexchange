@@ -42,14 +42,15 @@ extern std::vector<uint8_t> rgbData;
  * LittleFSから /data.json を読み込み、displayFlag/displayText/rgbData を抽出
  * 内部でJsonDocumentを解放するため、呼び出し後はポインタ経由アクセス不可
  */
-void loadDisplayDataFromJson();
+// LittleFS から /data.json を読み込み、表示用データをセット
+bool loadDisplayFromLittleFS();
 
 // メモリ上のJSON文字列から displayFlag/displayText/rgbData を抽出してセット
 // 成功なら true
-bool loadDisplayDataFromJsonString(const String& jsonString);
+// メモリ上のJSON文字列から表示用データをセット
+bool loadDisplayFromJsonString(const String& jsonString);
 
-// 受信JSONをRAMリングバッファへ（実装は上の宣言と同じ関数）
-void saveIncomingJson(const uint8_t* data, size_t len);
+// 受信JSONをRAMリングバッファへ（重複宣言を避けるためコメントのみ）
 
 /**
  * 現在のdisplayFlagを取得
@@ -67,8 +68,11 @@ const char* getDisplayText();
 const std::vector<uint8_t>& getRgbData();
 
 /**
- * LittleFS からJSON文字列を読み込み（ファイルが無ければ空文字列を返す）
+ * LittleFS からJSONの生文字列を読み込み（ファイルが無ければ空文字列を返す）
+ * 読み取りのみで、内部状態（displayFlag/text/rgb）は変更しない
  */
+// LittleFS からJSONの生文字列を読み込み（ファイルが無ければ空文字列を返す）
+// 読み取りのみで、内部状態（displayFlag/text/rgb）は変更しない
 String loadJsonFromPath(const char* path, size_t maxBytes = 2048);
 
 /**
