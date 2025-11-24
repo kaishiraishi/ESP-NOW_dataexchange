@@ -13,12 +13,10 @@ using DisplayManager::Matrix;
 extern uint8_t gMotionBrightness;    // レーダー/リップル共通
 extern uint8_t gMotionHue;           // レーダー/リップル共有色相
 
-void Matrix_SetMotionBrightness(uint8_t b);
-void Motion_SetHue(uint8_t h);
+
 
 // モーション関連の関数
 void Ripple_PlayOnce(uint16_t duration_ms = 0);
-void Radar_PlayOnce();
 
 // レーダー待機(非ブロッキング)
 void Radar_InitIdle();

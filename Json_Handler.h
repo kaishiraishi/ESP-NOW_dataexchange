@@ -24,8 +24,7 @@ size_t inboxSize();
 // i番目の要素を取得（0=最古）。成功ならtrue
 bool inboxGet(size_t index, InboxItem& out);
 
-// 全削除
-void inboxClear();
+
 
 // ========== 表示設定定数（.ino で定義） ==========
 extern uint16_t TEXT_FRAME_DELAY_MS;  // テキストスクロール速度 [ms]
@@ -58,20 +57,7 @@ bool loadDisplayFromJsonString(const String& jsonString);
 
 // 受信JSONをRAMリングバッファへ（重複宣言を避けるためコメントのみ）
 
-/**
- * 現在のdisplayFlagを取得
- */
-const char* getDisplayFlag();
 
-/**
- * 現在のdisplayTextを取得
- */
-const char* getDisplayText();
-
-/**
- * RGB配列へのアクセス（const reference）
- */
-const std::vector<uint8_t>& getRgbData();
 
 /**
  * LittleFS からJSONの生文字列を読み込み（ファイルが無ければ空文字列を返す）

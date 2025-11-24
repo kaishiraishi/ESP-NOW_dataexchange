@@ -46,15 +46,7 @@ bool inboxGet(size_t index, InboxItem& out) {
     return true;
 }
 
-void inboxClear() {
-    for (size_t i = 0; i < sCount; ++i) {
-        size_t pos = (sHead + i) % kInboxCapacity;
-        sInbox[pos].json = String();
-        sInbox[pos].at = 0;
-    }
-    sHead = 0;
-    sCount = 0;
-}
+
 
 static JsonObject parseJsonFile(const char* path) {
     if (!LittleFS.begin(false)) LittleFS.begin(true);
@@ -165,15 +157,3 @@ bool performDisplay() {
 }
 
 
-
-const char* getDisplayFlag() {
-    return displayFlag.c_str();
-}
-
-const char* getDisplayText() {
-    return displayText.c_str();
-}
-
-const std::vector<uint8_t>& getRgbData() {
-    return rgbData;
-}

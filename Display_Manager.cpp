@@ -16,7 +16,7 @@ static Adafruit_NeoMatrix s_matrix(
 Adafruit_NeoMatrix& Matrix = s_matrix;
 
 // テキスト表示用の明るさと状態
-static uint8_t gTextBrightness = 20;  // 初期値は TEXT_BRIGHTNESS と同期
+static uint8_t gTextBrightness = 20;  
 static int MatrixWidth = 0;
 
 // テキストカラーパレット
@@ -26,23 +26,6 @@ static const uint16_t colors[] = {
   s_matrix.Color(0,255,0),      // 緑
   s_matrix.Color(0,0,255)       // 青
 };
-
-// ---- 内部ユーティリティ（画像表示用） ----
-static void drawRGBArrayRotCCW(const uint8_t* rgb, size_t n) {
-  if (!rgb) return;
-  if (n < (size_t)(DISP_W * DISP_H * 3)) return;
-
-  s_matrix.fillScreen(0);
-  for (int sy = 0; sy < DISP_H; ++sy) {
-    for (int sx = 0; sx < DISP_W; ++sx) {
-      size_t i = (size_t)(sy * DISP_W + sx) * 3;
-      int dx = sy;
-      int dy = DISP_W - 1 - sx; // 90°CCW
-      s_matrix.drawPixel(dx, dy, s_matrix.Color(rgb[i], rgb[i+1], rgb[i+2]));
-    }
-  }
-  s_matrix.show();
-}
 
 // ---- 内部ユーティリティ（テキスト表示用） ----
 static int getStringWidth(const char* text) {
@@ -67,11 +50,9 @@ void Clear() {
 }
 
 void AllOn(uint8_t brightness) {
-  // 指定輝度で白一色を表示
   s_matrix.setBrightness(brightness);
   s_matrix.fillScreen(s_matrix.Color(255, 255, 255));
   s_matrix.show();
-  // ガードはここでは張らない（呼び出し側で必要なら BlockFor を使う）
 }
 
 bool ShowRGB(const uint8_t* rgb, size_t n, unsigned long display_ms) {
@@ -117,7 +98,6 @@ void SetTextBrightness(uint8_t b) {
 }
 
 void TextInit() {
-  // Matrix初期化はInit()で済んでいる想定
   s_matrix.setTextWrap(false);
   s_matrix.setBrightness(TEXT_BRIGHTNESS);
   s_matrix.setTextColor(colors[0]);

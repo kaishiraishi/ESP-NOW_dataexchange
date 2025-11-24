@@ -142,15 +142,8 @@ void Comm_Init(int wifiChannel) {
   }
 }
 
-int Comm_GetLastRssi() {
-  return (int)s_lastRssi;
-}
-
 void Comm_SetMinRssiToAccept(int dbm) {
   s_minRssiAccept = dbm;
-}
-int Comm_GetMinRssiToAccept() {
-  return (int)s_minRssiAccept;
 }
 
 void Comm_SetOnMessage(CommOnMessageCB cb) {

@@ -10,8 +10,7 @@ uint8_t gMotionHue        = 90; // 共通色相 (固定用)
 //210水色
 //235青緑
 
-void Matrix_SetMotionBrightness(uint8_t b){ gMotionBrightness = b; }
-void Motion_SetHue(uint8_t h){ gMotionHue = h; }
+
 
 // ユーティリティ関数
 static inline uint8_t gamma8(float v01){ 
@@ -40,62 +39,7 @@ static uint16_t ColorHSV8(uint8_t h,uint8_t s,uint8_t v){
   return Matrix.Color(r,g,b);
 }
 
-// ブロッキングRadar（色固定化のため色相更新は行わない）
-void Radar_PlayOnce(){
-  const float SPEED=2.5f; 
-  const float BW_F=0.8f; 
-  const float BW_B=0.05f; 
-  const uint8_t FADE=10; 
-  const uint16_t DT=16;
-  
-  uint8_t originalBrightness = Matrix.getBrightness();
-  Matrix.setBrightness(gMotionBrightness);
-  float ang=0; 
-  uint8_t hue=gMotionHue; 
-  const float cx=(Matrix.width()-1)*0.5f; 
-  const float cy=(Matrix.height()-1)*0.5f;
-  
-  while(ang<360.f){
-    for(int i=0;i<Matrix.width()*Matrix.height();++i){ 
-      uint32_t col=Matrix.getPixelColor(i); 
-      if(col){ 
-        uint8_t r=(col>>16)&0xFF,g=(col>>8)&0xFF,b=col&0xFF; 
-        r=(r<=FADE)?0:r-FADE; 
-        g=(g<=FADE)?0:g-FADE; 
-        b=(b<=FADE)?0:b-FADE; 
-        Matrix.setPixelColor(i,Matrix.Color(r,g,b)); 
-      }
-    }
-    
-    float rad=ang*(float)M_PI/180.f;
-    for(uint8_t y=0;y<Matrix.height();++y){
-      for(uint8_t x=0;x<Matrix.width();++x){ 
-        float dx=x-cx,dy=y-cy; 
-        float pr=atan2f(dy,dx); 
-        float diff=rad-pr; 
-        while(diff>M_PI) diff-=2.f*M_PI; 
-        while(diff<-M_PI) diff+=2.f*M_PI; 
-        float bw=(diff>0)?BW_F:BW_B; 
-        float br=expf(-(diff*diff)/(2.f*bw*bw)); 
-        if(br>0.05f){ 
-          uint8_t V=gamma8(br); 
-          uint16_t c=ColorHSV8(hue,255,V); 
-          Matrix.drawPixel(x,y,c);
-        } 
-      }
-    }
-    
-    Matrix.show(); 
-    ang+=SPEED; 
-    if(ang>=360.f){ break;} 
-    delay(DT);
-  }
-  
-  // 色相を進めず固定
-  Matrix.fillScreen(0); 
-  Matrix.show();
-  Matrix.setBrightness(originalBrightness);
-}
+
 
 void Ripple_PlayOnce(uint16_t duration_ms){
   (void)duration_ms; // 未使用パラメータ
