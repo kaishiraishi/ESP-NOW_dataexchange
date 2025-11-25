@@ -14,6 +14,7 @@
 #include "Json_Handler.h"     // JSON読み込み・保存管理
 #include "BLE_Manager.h"      // BLEを使ったJSON受信
 #include "Comm_EspNow.h"      // 通信シーケンス
+#include "OTA_Handler.h"      // Wifi経由で書き込み
 
 /***** ========== LED MATRIX ========== *****/
 int GLOBAL_BRIGHTNESS = 20;
@@ -76,6 +77,8 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   Serial.println("\n=== ESP-NOW JSON Broadcast ===");
+
+  setupOTA();
 
   DisplayManager::Init(GLOBAL_BRIGHTNESS);
   DisplayManager::TextInit();
@@ -150,6 +153,9 @@ void setup() {
 }
 
 void loop() {
+
+  handleOTA();
+  
   static unsigned long nextSend = 0;
   unsigned long now = millis();
 
