@@ -130,6 +130,59 @@ void TextPlayOnce(const char* text, uint16_t frame_delay_ms) {
   }
 }
 
+// --- Non-blocking Text Scroll State ---
+static String s_scrollText = "";
+static uint16_t s_scrollDelay = 60;
+static int s_scrollX = 0;
+static int s_textWidth = 0;
+static unsigned long s_lastScrollTime = 0;
+static bool s_isScrolling = false;
+
+void TextScroll_Start(const char* text, uint16_t frame_delay_ms) {
+  if (!text) return;
+  s_scrollText = String(text);
+  s_scrollDelay = frame_delay_ms;
+  s_textWidth = getStringWidth(s_scrollText.c_str());
+  
+  s_matrix.setBrightness(GLOBAL_BRIGHTNESS);
+  s_matrix.setTextWrap(false); // Ensure no wrap
+  s_scrollX = s_matrix.width();
+  s_isScrolling = true;
+  s_lastScrollTime = millis();
+  
+  // Initial draw
+  s_matrix.fillScreen(0);
+  s_matrix.setCursor(s_scrollX, 0);
+  s_matrix.print(s_scrollText);
+  s_matrix.show();
+}
+
+void TextScroll_Update() {
+  if (!s_isScrolling) return;
+
+  if (millis() - s_lastScrollTime >= s_scrollDelay) {
+    s_lastScrollTime = millis();
+    
+    s_matrix.fillScreen(0);
+    s_matrix.setCursor(s_scrollX, 0);
+    s_matrix.print(s_scrollText);
+    s_matrix.show();
+    
+    s_scrollX--;
+    if (s_scrollX < -s_textWidth) {
+      s_scrollX = s_matrix.width(); // Loop back
+    }
+  }
+}
+
+void TextScroll_Stop() {
+  s_isScrolling = false;
+}
+
+bool TextScroll_IsActive() {
+  return s_isScrolling;
+}
+
 unsigned long TextEstimateDurationMs(const char* text, uint16_t frame_delay_ms) {
   if (!text) return 0;
   const int textWidth = getStringWidth(text);

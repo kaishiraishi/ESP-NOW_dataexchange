@@ -110,7 +110,7 @@ void setup() {
     } else {
       // 表示モード終了 (End)
       DisplayManager::Clear();
-      Radar_InitIdle();
+      //Radar_InitIdle();
     }
   });
 
@@ -144,7 +144,7 @@ void setup() {
   Comm_SetMinRssiToAccept(RSSI_THRESHOLD_DBM);
 
   if (!DisplayManager::IsActive()) {
-    Radar_InitIdle();
+    //Radar_InitIdle();
   } else {
     Serial.println("🔍 起動時に表示中のため、レーダーは有効期限後に開始");
   }
@@ -160,13 +160,15 @@ void loop() {
   unsigned long now = millis();
 
   if (DisplayManager::EndIfExpired()) {
-    Radar_InitIdle();
+    if (!myJson.isEmpty()) {
+      performDisplay();
+    }
   }
 
   g_btn.tick();
 
   if (!DisplayManager::IsActive() && !DisplayMode) {
-    Radar_IdleStep(true);
+    DisplayManager::TextScroll_Update();
   }
   delay(16);
 

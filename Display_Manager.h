@@ -43,6 +43,13 @@ namespace DisplayManager {
   void SetTextBrightness(uint8_t b);
   void TextInit();  // テキスト用初期設定（setTextWrap等）
   void TextPlayOnce(const char* text, uint16_t frame_delay_ms);
+  
+  // Non-blocking Text Scroll
+  void TextScroll_Start(const char* text, uint16_t frame_delay_ms);
+  void TextScroll_Update();
+  void TextScroll_Stop();
+  bool TextScroll_IsActive();
+
   unsigned long TextEstimateDurationMs(const char* text, uint16_t frame_delay_ms);
 
   // === Motion等が参照するMatrix（互換維持） ===
