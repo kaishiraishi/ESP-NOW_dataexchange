@@ -47,6 +47,7 @@ String myJson;
 static void OnMessageReceived(const uint8_t* data, size_t len) {
   String incoming((const char*)data, len);
 
+  // 直近のデータと同じなら無視（デバウンス）
   if (incoming.equals(lastRxData) && (millis() - lastRxTime < IGNORE_MS)) {
     return;
   }
@@ -55,6 +56,10 @@ static void OnMessageReceived(const uint8_t* data, size_t len) {
   lastRxTime = millis();
 
   saveIncomingJson(data, len);
+  
+  // ★追加: リップル再生前に画面をクリアし、テキストスクロールを強制停止する
+  DisplayManager::Clear(); 
+
   DisplayManager::BlockFor(RECEIVE_DISPLAY_GUARD_MS);
   Ripple_PlayOnce();
 

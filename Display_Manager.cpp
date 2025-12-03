@@ -2,6 +2,9 @@
 
 namespace DisplayManager {
 
+// ★追加: 前方宣言 (Clear関数などで呼び出せるようにする)
+void TextScroll_Stop();
+
 // ---- 内部状態 ----
 static unsigned long s_until_ms = 0;
 
@@ -50,18 +53,21 @@ void Init(uint8_t global_brightness) {
 
 // ========== 公開API：画像表示 ==========
 void Clear() {
+  TextScroll_Stop(); // ★追加: スクロールを停止
   s_matrix.fillScreen(0);
   s_matrix.show();
   s_until_ms = 0;
 }
 
 void AllOn(uint8_t brightness) {
+  TextScroll_Stop(); // ★追加: スクロールを停止
   s_matrix.setBrightness(brightness);
   s_matrix.fillScreen(s_matrix.Color(255, 255, 255));
   s_matrix.show();
 }
 
 bool ShowRGB(const uint8_t* rgb, size_t n, unsigned long display_ms) {
+  TextScroll_Stop(); // ★追加: スクロールを停止
   if (!rgb) return false;
   if (n < (size_t)(DISP_W * DISP_H * 3)) return false;
 
@@ -85,6 +91,7 @@ bool ShowRGB(const uint8_t* rgb, size_t n, unsigned long display_ms) {
 }
 
 bool ShowRGB_Animated(const uint8_t* rgb, size_t n, unsigned long display_ms) {
+  TextScroll_Stop(); // ★追加: スクロールを停止
   if (!rgb) return false;
   if (n < (size_t)(DISP_W * DISP_H * 3)) return false;
 
@@ -140,6 +147,7 @@ void TextInit() {
 }
 
 void TextPlayOnce(const char* text, uint16_t frame_delay_ms) {
+  TextScroll_Stop(); // ★追加: ノンブロッキングスクロールを停止
   s_matrix.setBrightness(GLOBAL_BRIGHTNESS);
   int textWidth = getStringWidth(text);
   MatrixWidth = s_matrix.width();
@@ -163,6 +171,7 @@ static bool s_isScrolling = false;
 static bool s_scrollLoop = true;
 
 void TextScroll_Start(const char* text, uint16_t frame_delay_ms, bool loop) {
+  TextScroll_Stop(); // ★追加: 既存のスクロールがあれば停止してリセット
   if (!text) return;
   s_scrollText = String(text);
   s_scrollDelay = frame_delay_ms;
