@@ -14,7 +14,7 @@
 #include "Json_Handler.h"
 #include "BLE_Manager.h"
 #include "Comm_EspNow.h"
-#include "OTA_Handler.h" // ★変更: コメントアウト解除
+#include "OTA_Handler.h"
 
 /***** LED MATRIX 設定 *****/
 int GLOBAL_BRIGHTNESS = 20;
@@ -26,9 +26,8 @@ uint16_t TEXT_FRAME_DELAY_MS = 60;
 #endif
 
 static OneButton g_btn;
-static OneButton g_btnBoot(0, true); // ★追加: Bootボタン (GPIO 0)
+static OneButton g_btnBoot(0, true); // Bootボタン (GPIO 0)
 static bool DisplayMode = false;
-static bool OtaMode = false; // ★追加: OTAモード管理フラグ
 
 /***** 受信制御 *****/
 String lastRxData = "";
@@ -49,7 +48,6 @@ String myJson;
 static void OnMessageReceived(const uint8_t* data, size_t len) {
   String incoming((const char*)data, len);
 
-  // 直近のデータと同じなら無視（デバウンス）
   if (incoming.equals(lastRxData) && (millis() - lastRxTime < IGNORE_MS)) {
     return;
   }
@@ -59,29 +57,27 @@ static void OnMessageReceived(const uint8_t* data, size_t len) {
 
   saveIncomingJson(data, len);
   
-  // ★追加: リップル再生前に画面をクリアし、テキストスクロールを強制停止する
   DisplayManager::Clear(); 
 
   DisplayManager::BlockFor(RECEIVE_DISPLAY_GUARD_MS);
   Ripple_PlayOnce();
 
   if (!loadDisplayFromJsonString(incoming)) {
-    Serial.println("JSONパース失敗");
+    debugPrintln("JSONパース失敗");
   } else if (!performDisplay(true, RECEIVE_DISPLAY_HOLD_MS, false)) {
-    Serial.println("表示失敗");
+    debugPrintln("表示失敗");
   } else {
-    Serial.println("受信データを表示中");
+    debugPrintln("受信データを表示中");
   }
-  Serial.println(incoming);
+  debugPrintln(incoming);
 }
 
 /***** setup *****/
 void setup() {
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n=== ESP-NOW JSON Broadcast ===");
 
-  // setupOTA(); // ★起動時はOTAセットアップしない（ボタンで起動する）
+  Serial.println("\n=== ESP-NOW JSON Broadcast ===");
 
   DisplayManager::Init(GLOBAL_BRIGHTNESS);
   DisplayManager::TextInit();
@@ -91,27 +87,17 @@ void setup() {
   g_btn.setup(BUTTON_PIN, INPUT_PULLUP, true);
   g_btn.setClickMs(300);
 
-  // ★追加: Bootボタン初期化とOTAモード切り替え
+  // Bootボタン: クリックでデバッグモードへ移行
   g_btnBoot.attachClick([]() {
-    if (OtaMode) return; // 既にOTAモードなら何もしない
-    
-    Serial.println("\n[OTA] Boot Button Pressed. Starting OTA Mode...");
-    OtaMode = true;
-
-    // ESP-NOWを停止してWiFi接続に備える
-    esp_now_deinit();
-    WiFi.disconnect(true);
-    delay(100);
-
-    // OTAセットアップ（内部で赤→白のLED制御を行う）
-    setupOTA();
+    debugPrintln("[BOOT] Starting Debug Mode...");
+    startDebugMode();
   });
 
   // ダブルクリック: 表示モード切替
   g_btn.attachDoubleClick([]() {
     DisplayMode = !DisplayMode;
     DiagonalWave_PlayOnce();
-    Serial.printf("[MODE] 受信データ表示モード: %s\n", DisplayMode ? "ON" : "OFF");
+    debugPrintf("[MODE] 受信データ表示モード: %s\n", DisplayMode ? "ON" : "OFF");
 
     if (DisplayMode) {
       size_t n = inboxSize();
@@ -123,7 +109,7 @@ void setup() {
           }
         }
       } else {
-        Serial.println("[INBOX] データなし");
+        debugPrintln("[INBOX] データなし");
       }
     } else {
       DisplayManager::Clear();
@@ -147,14 +133,14 @@ void setup() {
         }
       }
     } else {
-      Serial.println("[INBOX] 2番目のデータなし");
+      debugPrintln("[INBOX] 2番目のデータなし");
     }
   });
 
   // 保存されたJSONを読み込んで表示
   myJson = loadJsonFromPath(JSON_PATH, 2048);
-  Serial.printf("生データ:\n%s\n", myJson.c_str());
-  Serial.printf("%s (%uB)\n", JSON_PATH, (unsigned)myJson.length());
+  debugPrintf("生データ:\n%s\n", myJson.c_str());
+  debugPrintf("%s (%uB)\n", JSON_PATH, (unsigned)myJson.length());
   if (!myJson.isEmpty()) {
     loadDisplayFromLittleFS();
     performDisplay();
@@ -163,12 +149,10 @@ void setup() {
   // ESP-NOW初期化
   Comm_SetOnMessage(OnMessageReceived);
 
-  // WiFiチャンネルを強制的に固定
   WiFi.mode(WIFI_STA);
   esp_wifi_set_channel(WIFI_CH, WIFI_SECOND_CHAN_NONE);
-  Serial.printf("強制的に CH %d を使用\n", WIFI_CH);
+  debugPrintf("強制的に CH %d を使用\n", WIFI_CH);
   Comm_Init(WIFI_CH);
-
 
   Comm_SetMinRssiToAccept(RSSI_THRESHOLD_DBM);
 
@@ -177,39 +161,39 @@ void setup() {
 
 /***** loop *****/
 void loop() {
-  g_btn.tick();
-  g_btnBoot.tick(); // ★追加: Bootボタンの監視
-
-  // ★追加: OTAモード中はOTA処理のみを行い、他の処理をスキップする
-  if (OtaMode) {
-    handleOTA();
+  // デバッグモード中はOTA/Telnet処理のみ
+  if (isDebugMode()) {
+    handleDebugMode();
     return;
   }
+
+  // ========== 通常モードの処理 ==========
+  g_btn.tick();
+  g_btnBoot.tick();
 
   static unsigned long nextSend = 0;
   unsigned long now = millis();
 
-  // ★追加: 受信体制の定期チェックとログ出力 (5秒ごと)
+  // 受信体制の定期チェック (5秒ごと)
   static unsigned long lastStatusCheck = 0;
   if (now - lastStatusCheck > 5000) {
     lastStatusCheck = now;
-    
+
     uint8_t pCh;
     wifi_second_chan_t sCh;
     esp_wifi_get_channel(&pCh, &sCh);
-    
-    Serial.println("--- [RX STATUS CHECK] ---");
-    Serial.printf("Time: %lu ms\n", now);
-    Serial.printf("WiFi Channel: %d (Target: %d)\n", pCh, WIFI_CH);
-    Serial.printf("RSSI Threshold: %d dBm\n", RSSI_THRESHOLD_DBM);
-    Serial.println("State: Listening for ESP-NOW packets...");
-    
-    // チャンネルずれの自動修正
+
+    debugPrintln("--- [RX STATUS CHECK] ---");
+    debugPrintf("Time: %lu ms\n", now);
+    debugPrintf("WiFi Channel: %d (Target: %d)\n", pCh, WIFI_CH);
+    debugPrintf("RSSI Threshold: %d dBm\n", RSSI_THRESHOLD_DBM);
+    debugPrintln("State: Listening for ESP-NOW packets...");
+
     if (pCh != WIFI_CH) {
-        Serial.println("[WARN] Channel drifted! Resetting...");
-        esp_wifi_set_channel(WIFI_CH, WIFI_SECOND_CHAN_NONE);
+      debugPrintln("[WARN] Channel drifted! Resetting...");
+      esp_wifi_set_channel(WIFI_CH, WIFI_SECOND_CHAN_NONE);
     }
-    Serial.println("-------------------------");
+    debugPrintln("-------------------------");
   }
 
   // 表示期限切れ時に自分のデータを再表示
@@ -219,8 +203,6 @@ void loop() {
       performDisplay();
     }
   }
-
-  g_btn.tick();
 
   if (DisplayManager::TextScroll_IsActive()) {
     DisplayManager::TextScroll_Update();
@@ -232,7 +214,7 @@ void loop() {
   // 定期ブロードキャスト
   if (!myJson.isEmpty() && now >= nextSend) {
     Comm_SendJsonBroadcast(myJson);
-    nextSend = now + 100 + (esp_random() % 100);
+    nextSend = now + 1000 + (esp_random() % 500);
   }
 
   // シリアル経由でJSON保存
@@ -246,8 +228,9 @@ void loop() {
         myJson = js;
         loadDisplayFromJsonString(myJson);
         performDisplay();
-        Serial.println("Saved JSON to /data.json and displayed it");
+        debugPrintln("Saved JSON to /data.json and displayed it");
       }
     }
   }
 }
+

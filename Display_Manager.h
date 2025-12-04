@@ -32,9 +32,10 @@ namespace DisplayManager {
   bool ShowRGB(const uint8_t* rgb, size_t n, unsigned long display_ms);
   bool ShowRGB_Animated(const uint8_t* rgb, size_t n, unsigned long display_ms); // アニメーション付き
   void Clear();
-  // 全点灯（白）
-  void AllOnGreen(uint8_t brightness);  // ★追加
-  void AllOnRed(uint8_t brightness);    // ★追加
+  // 全点灯
+  void AllOnGreen(uint8_t brightness);
+  void AllOnRed(uint8_t brightness);
+  void AllOnWhite(uint8_t brightness);  // ★追加
 
   // === 表示状態管理（ガード） ===
   bool IsActive();              // 表示中ガードが張られているか

@@ -73,6 +73,13 @@ void AllOnRed(uint8_t brightness) {
   s_matrix.show();
 }
 
+void AllOnWhite(uint8_t brightness) {
+  TextScroll_Stop();
+  s_matrix.setBrightness(brightness);
+  s_matrix.fillScreen(s_matrix.Color(255, 255, 255));
+  s_matrix.show();
+}
+
 bool ShowRGB(const uint8_t* rgb, size_t n, unsigned long display_ms) {
   TextScroll_Stop(); // ★追加: スクロールを停止
   if (!rgb) return false;
