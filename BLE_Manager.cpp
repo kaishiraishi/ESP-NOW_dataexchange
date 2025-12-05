@@ -58,8 +58,8 @@ class ServerCallbacks : public BLEServerCallbacks {
 };
 
 void BLE_Init() {
-  BLEDevice::init("turnie_device");
-  Serial.printf("[BLE] init: device name=turnie_device\n");
+  BLEDevice::init("turnie 2");
+  Serial.printf("[BLE] init: device name=turnie 1\n");
 
   BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks()); // Register callbacks
